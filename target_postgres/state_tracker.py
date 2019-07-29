@@ -10,7 +10,7 @@ class TargetError(Exception):
     """
 
 
-class StateTracker:
+class StreamTracker:
     """
     Object to track STATE messages coming in from the tap and which streams need to be flushed before they can be safely emitted.
     Because Singer taps don't have a standard way of expressing which streams correspond to which STATEs, the target can only safely
