@@ -137,7 +137,7 @@ class BufferedSingerStream():
             self.validator.validate(record_message['record'])
         except ValidationError as error:
             add_record = False
-            self.invalid_records.append((error, record_message))
+            self.invalid_records.append((error, error.path, record_message))
 
         if add_record:
             self.__buffer.append(record_message)
