@@ -37,20 +37,20 @@ def stream_to_target(stream, target, config={}):
     :param config: [optional] configuration for buffers etc.
     :return: None
     """
-
+    invalid_records_detect = config.get('invalid_records_detect')
+    invalid_records_threshold = config.get('invalid_records_threshold')
+    max_batch_rows = config.get('max_batch_rows', 200000)
+    max_batch_size = config.get('max_batch_size', 104857600)  # 100MB
+    batch_detection_threshold = config.get('batch_detection_threshold', max(max_batch_rows / 40, 50))
     state_support = config.get('state_support', True)
-    state_tracker = StreamTracker(target, state_support)
-    _run_sql_hook('before_run_sql', config, target)
+
+    state_tracker = StreamTracker(target, state_support, max_watermark_lag=max_batch_rows * 5)
 
     try:
+        _run_sql_hook('before_run_sql', config, target)
         if not config.get('disable_collection', False):
             _async_send_usage_stats()
 
-        invalid_records_detect = config.get('invalid_records_detect')
-        invalid_records_threshold = config.get('invalid_records_threshold')
-        max_batch_rows = config.get('max_batch_rows', 200000)
-        max_batch_size = config.get('max_batch_size', 104857600)  # 100MB
-        batch_detection_threshold = config.get('batch_detection_threshold', max(max_batch_rows / 40, 50))
 
         line_count = 0
         for line in stream:
@@ -63,10 +63,10 @@ def stream_to_target(stream, target, config={}):
                           line
                           )
             if line_count > 0 and line_count % batch_detection_threshold == 0:
-                state_tracker.flush_streams()
+                state_tracker.flush_streams_if_required()
             line_count += 1
 
-        state_tracker.flush_streams(force=True)
+        state_tracker.flush_streams_if_required(force=True)
         _run_sql_hook('after_run_sql', config, target)
 
         return None

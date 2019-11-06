@@ -1,9 +1,13 @@
 from collections import deque
 import json
+import singer
 import singer.statediff as statediff
 import sys
 
 from target_postgres.exceptions import TargetError
+
+
+LOGGER = singer.get_logger()
 
 
 class StreamTracker:
@@ -16,9 +20,10 @@ class StreamTracker:
     saved to the database from their buffers.
     """
 
-    def __init__(self, target, emit_states):
+    def __init__(self, target, emit_states, max_watermark_lag=1000000):
         self.target = target
         self.emit_states = emit_states
+        self.max_watermark_lag = max_watermark_lag
 
         self.streams = {}
 
@@ -41,10 +46,28 @@ class StreamTracker:
         self._write_batch_and_update_watermarks(stream)
         self._emit_safe_queued_states()
 
-    def flush_streams(self, force=False):
+    def flush_streams_if_required(self, force=False):
+        streams_to_flush = set()
         for (stream, stream_buffer) in self.streams.items():
             if force or stream_buffer.buffer_full:
-                self._write_batch_and_update_watermarks(stream)
+                streams_to_flush.add(stream)
+
+        # Flush all streams if the watermark is really far behind to latch progress even if not all the
+        # buffers are full. This is necessary when a tap is emitting a lot of records in one stream and
+        # very few in another stream such that one buffer is filling up and flushing frequently, but the
+        # other is not. That other buffer keeps the safe to emit watermark low until it fills, which it
+        # might never, so in order to emit any state messages at all (before the whole tap is complete)
+        # we need to eagerly flush all the buffers when the watermark is really far behind.
+        if len(self.state_queue) > 0:
+            watermark_lag = self.message_counter - self._safe_flush_threshold()
+            if watermark_lag > self.max_watermark_lag:
+                LOGGER.info("Eagerly flushing all buffers as max watermark lag has been encountered")
+                force = True
+                for stream in self.streams.keys():
+                    streams_to_flush.add(stream)
+
+        for stream in streams_to_flush:
+            self._write_batch_and_update_watermarks(stream)
 
         self._emit_safe_queued_states(force=force)
 
@@ -68,7 +91,7 @@ class StreamTracker:
         stream_buffer.flush_buffer()
         self.stream_flush_watermarks[stream] = self.stream_add_watermarks.get(stream, 0)
 
-    def _emit_safe_queued_states(self, force=False):
+    def _safe_flush_threshold(self):
         # State messages that occured before the least recently flushed record are safe to emit.
         # If they occurred after some records that haven't yet been flushed, they aren't safe to emit.
         # Because records arrive at different rates from different streams, we take the earliest unflushed record
@@ -78,9 +101,12 @@ class StreamTracker:
         for stream, watermark in self.stream_flush_watermarks.items():
             if stream in self.streams_added_to:
                 valid_flush_watermarks.append(watermark)
-        safe_flush_threshold = min(valid_flush_watermarks, default=0)
+        return min(valid_flush_watermarks, default=0)
 
+    def _emit_safe_queued_states(self, force=False):
+        safe_flush_threshold = self._safe_flush_threshold()
         emittable_state = None
+
         while len(self.state_queue) > 0 and (force or self.state_queue[0]['watermark'] <= safe_flush_threshold):
             emittable_state = self.state_queue.popleft()['state']
 
